@@ -35,7 +35,7 @@ The data is extracted using functions from the nashvillesc package which require
 
 ## Pipeline
 
-Run through [Runs_dashboard.rmd](Runs_dashboard.rmd). The Runs_dashboard.rmd contains code to take data using the package pre-process it, apply the algorithm to generate the runs data, cluster them and produce a visualization.
+Run through 'Runs_dashboard.rmd' The Runs_dashboard.rmd contains code to take data using the package pre-process it, apply the algorithm to generate the runs data, cluster them and produce a visualization.
 
 
 ### Dashboard
