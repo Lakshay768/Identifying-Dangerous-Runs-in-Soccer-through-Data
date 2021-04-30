@@ -1,0 +1,775 @@
+
+
+
+################# Importing necessary libraries
+library(readr)
+library(nashvillesc)
+library(tidyverse)
+library(transport)
+library(lpSolve)
+library(readr)
+library(rdist)
+library(factoextra)
+library(fpc)
+library(dbscan)
+library(dplyr)
+library(bezier)
+library(flexdashboard)
+library(shiny)
+library(shinydashboard)
+library(readr)
+library(tidyverse)
+library(nashvillesc)
+library(soccermatics)
+library(signal)
+library(DT)
+
+
+################ Function to get the coordinates of each run identified for a single game ##############################
+
+
+#### Parameters:
+
+###  Game id : Identifier for the match for which to produce results
+
+###  Defending_teamid : Identifier for the team who would be on defense in all the sequences. In other words the runs would be found against this team.
+
+###  Attack : If True then the team id provided above will be for offense.
+
+###  Box_entry : If 1 then only those sequences are counted which lead to box entry, if 0 then all sequences will be counted
+
+
+###  Adjust coordinates to reflect intent Boolean value
+
+dangerous_runsV2<-function(gameid,defending_teamid,attack=F,box_entry,adjust_coordinates=F,from_seq){
+  
+  
+  
+  #### Read in event data which contains information about all on ball events during a match for eg. every pass, dribble, tackle etc
+  
+  event_data<-nashvillesc::parse_f24(gameid)
+  
+  
+  
+  #### Adding a new column to convert the time on the clock to only seconds 
+  
+  event_data$total_secs<-(event_data$min*60) + event_data$sec
+  
+  
+  
+  #### Getting the season calendar of Nashville to check for a particular game if Nashville was the home or the away team
+  
+  calendar_season<-nashvillesc::getSeasonCalendar()
+  filtered_calendar<-calendar_season %>% dplyr::filter(game_id==gameid)
+  
+  
+  
+  
+  #### Get tracking data of the game identified by the gameid
+  
+  tracking_data<- nashvillesc::get_parsed_2S_tracking_data(gameid,return_data = T)
+  tracking_data$team<-as.factor(tracking_data$team)
+  
+  
+  
+  #### Get Insights data of the game identified by gameid
+  
+  insight_data<-nashvillesc::get_parsed_2S_Insight_data(gameid,return_data = T)
+  insight_data$diff_secs<-insight_data$endClock - insight_data$startClock
+  
+  
+  
+  
+  #### How to get relevant sequences
+  ## 1) Sequences which started after a Throw in, Goal Kick, Kick off, Tackle Recovery, Tackle, Pass interception
+  ## 2) Sequences were atleast 15 secs long
+  ## 3) Had atleast 5 passes inside the offensive team's own half (This condition is checked later)
+  
+  #### Chosen sequences which were atleast 15 seconds long and came from these start types.
+  
+  if(attack==T){
+    timestamps_data<-insight_data %>% dplyr::filter(markingType=='possession' & diff_secs>=15 & startType %in% from_seq & defTeamId!=as.character(defending_teamid)) %>% select(startFrameIdx,endFrameIdx,startClock,endClock,diff_secs,startType)
+  }else{
+    timestamps_data<-insight_data %>% dplyr::filter(markingType=='possession' & diff_secs>=15 & startType %in% from_seq & defTeamId==as.character(defending_teamid)) %>% select(startFrameIdx,endFrameIdx,startClock,endClock,diff_secs,startType)
+  }
+  
+  timestamps_data$sequence_id <- 1:nrow(timestamps_data)
+  library(deldir)
+  
+  
+  
+  
+  
+  #### Function to calculate space created by offensive team at any given frame
+  find_space_created<-function(track_data){
+    
+    #### Thresholding the data to prevent any coordinates which are outside the pitch dimensions  
+    
+    
+    track_data$x[which(track_data$x>52.5)]<-52
+    track_data$y[which(track_data$y>34)]<-34
+    
+    track_data$x[which(track_data$x< -52.5)]<- -52.5
+    track_data$y[which(track_data$y< -34)]<- -34
+    
+    
+    
+    #### Create deldir object
+    
+    deldir_obj<-deldir(track_data$x,track_data$y,list(ndx=2,ndy=2),rw=c(-52.5,52.5,-34,34))
+    
+    
+    track_data<-track_data %>% arrange(x,y)
+    df_deldir<-deldir_obj$summary
+    df_deldir<-df_deldir %>% dplyr::filter(pt.type=='data')
+    
+    df_deldir<-df_deldir %>% arrange(x,y)
+    df_deldir$team<-track_data$team
+    
+    
+    
+    # Space creation total area for away team 
+    
+    if(attack==T){
+      if(filtered_calendar[[1,3]]== defending_teamid){
+        value<- df_deldir %>% dplyr::filter(team=='away') %>% pull(del.area) %>% sum()
+      }else{
+        value<- df_deldir %>% dplyr::filter(team=='home') %>% pull(del.area) %>% sum()
+      }
+      
+    }else{
+      if(filtered_calendar[[1,3]]== defending_teamid){
+        value<- df_deldir %>% dplyr::filter(team=='home') %>% pull(del.area) %>% sum()
+      }else{
+        value<- df_deldir %>% dplyr::filter(team=='away') %>% pull(del.area) %>% sum()
+      }
+    }
+    return(value)
+  }
+  
+  
+  
+  
+  #### Functions to rescale the coordinates of the tracking data to 
+  
+  rescale_x<-function(x){
+    result<-scales::rescale(x,to=c(0,100),from=c(-52.5,52.5))
+    return(result)
+  }
+  
+  rescale_y<-function(x){
+    result<-scales::rescale(x,to=c(0,100),from=c(-34,34))
+    return(result)
+  }
+  
+  
+  
+  
+  #### Function to create gaussian normals for each player 
+  
+  make_gauss<-function(data){
+    for (i in 1:nrow(data)){
+      cov_mat<-matrix(rep(1,4),ncol=2,byrow=T)
+      cov_mat[1,2]<-cov_mat[2,1]<-data$sd_x[i]*data$sd_y[i]
+      
+      cov_mat[1,1]<-(data$sd_x[i])^2
+      cov_mat[2,2]<-(data$sd_y[i])^2
+      
+      test1<-MASS::mvrnorm(1000,mu = c(data$avg_x[i],data$avg_y[i]),Sigma = cov_mat)
+      
+      data$gauss_data[i]<-list(test1)
+    }
+    
+    return(data)
+    
+  }
+  
+  
+  
+  
+  
+  
+  #### Function to center the tracking data to the center circle
+  
+  center_tracking<-function(data){
+    center_x<-data %>% pull(x) %>% mean()
+    center_y<-data %>% pull(y) %>% mean()
+    nudge_x<-0-center_x
+    nudge_y<-0-center_y
+    
+    data$x<-data$x + nudge_x
+    data$y<-data$y +nudge_y
+    
+    return(data)
+  }
+  
+  
+  library(lqmm)
+  
+  
+  
+  
+  
+  #### Function to scale a formation to take care of cases when a formation might be an expanded version of another formation
+  
+  scale_min_func<-function(k,form1,form2){
+    
+    #creating the scaled co-variance matrix again for formation passed in first in "form1"
+    
+    for(i in 1:nrow(form1)){
+      cov_mat<-matrix(rep(1,4),ncol=2,byrow=T)
+      cov_mat[1,2]<-cov_mat[2,1]<-form1$sd_x[i]*form1$sd_y[i]*k
+      
+      cov_mat[1,1]<-((form1$sd_x[i])^2) *(k^2)
+      cov_mat[2,2]<-((form1$sd_y[i])^2)*(k^2)
+      cov_mat <- make.positive.definite(cov_mat, tol=1e-3)
+      test1<-MASS::mvrnorm(1000,mu = c(form1$avg_x[i],form1$avg_y[i]),Sigma = cov_mat)
+      
+      form1$gauss_data[i]<-list(test1)
+    }
+    
+    dist_matrix<-matrix(rep(NA,100),ncol=10,byrow = T)
+    for(i in 1:nrow(form1)){
+      
+      for (j in 1:nrow(form2)){
+        dist_matrix[i,j]<-(wasserstein1d(form1[i,7][[1]][[1]],form2[j,7][[1]][[1]],p=2))^2
+        
+      }
+    }
+    
+    sum(dist_matrix*(lp.assign(dist_matrix)$solution))
+    
+  }
+  
+  
+  
+  
+  #### Function to find similarity between two formations/shapes
+  
+  sim_formations<-function(form1,form2){
+    dist_matrix<-matrix(rep(NA,100),ncol=10,byrow = T)
+    for( i in 1:nrow(form1)){
+      for (j in 1:nrow(form2)){
+        dist_matrix[i,j]<-(wasserstein1d(form1[i,7][[1]][[1]],form2[j,7][[1]][[1]],p=2))^2
+        
+      }
+    }
+    
+    if((!is.na(lp.assign(dist_matrix))) & (!is.null(lp.assign(dist_matrix)))){
+      return(sum(dist_matrix*(lp.assign(dist_matrix)$solution)) )
+    }else{
+      return(10000)
+    }
+    
+    
+  }
+  
+  
+  
+  
+  
+  scaled_similarity_score<-function(form1,form2){
+    return(min(optim(1,scale_min_func,form1=form1,form2=form2)$value,optim(1,scale_min_func,form1=form2,form2=form1)$value))
+  }
+  
+  
+  
+  
+  center_tracking2<-function(data){
+    center_x<-data %>% pull(avg_x) %>% mean()
+    center_y<-data %>% pull(avg_y) %>% mean()
+    nudge_x<-0-center_x
+    nudge_y<-0-center_y
+    
+    data$avg_x<-data$avg_x + nudge_x
+    data$avg_y<-data$avg_y +nudge_y
+    
+    return(data)
+  }
+  
+  
+  
+  
+  
+  #### Getting the formation/ shape data for the defending team for each sequence in the 'timestamps data'
+  
+  formation_data<-list()
+  for(i in 1:nrow(timestamps_data)){
+    if(attack==T){
+      if(filtered_calendar[[1,3]]== defending_teamid){
+        players_track<-tracking_data %>% dplyr::filter((frameIdx>=timestamps_data[[i,1]]) & (frameIdx<=timestamps_data[[i,2]]) & (team=='away') & (number!=1))
+      }
+      else{
+        players_track<-tracking_data %>% dplyr::filter((frameIdx>=timestamps_data[[i,1]]) & (frameIdx<=timestamps_data[[i,2]]) & (team=='home') & (number!=1))
+      }
+    }else{
+      if(filtered_calendar[[1,3]]== defending_teamid){
+        players_track<-tracking_data %>% dplyr::filter((frameIdx>=timestamps_data[[i,1]]) & (frameIdx<=timestamps_data[[i,2]]) & (team=='home') & (number!=1))
+      }
+      else{
+        players_track<-tracking_data %>% dplyr::filter((frameIdx>=timestamps_data[[i,1]]) & (frameIdx<=timestamps_data[[i,2]]) & (team=='away') & (number!=1))
+      }
+    }
+    players_track<- players_track %>% group_by(playerId) %>% summarise(avg_x=mean(x),avg_y=mean(y),sd_x=sd(x),sd_y=sd(y))
+    
+    players_track$sequence_id<- timestamps_data[[i,7]]
+    
+    formation_data[[i]]<- players_track
+    
+  }
+  
+  
+  
+  
+  
+  #### Creates the gaussian normals for each player in the formation data (This step is a pre-requisite to find similarity in two different shapes) and also centers the data for consistency(to keep the point of reference same for every shape)
+  
+  formation_data<-lapply(formation_data, make_gauss) %>% lapply(center_tracking2)
+  
+  
+  
+  
+  #### Calculates the similarity score for every formation for all the sequences and stores it in a distance matrix to prepare it for clustering
+  
+  df2 <- data.frame(matrix(ncol = length(formation_data), nrow = length(formation_data)))
+  for (x in 1:length(formation_data)) {
+    for (y in 1:length(formation_data)) {
+      
+      # can use scaled similarity score instead of sim formations to create distance matrix
+      df2[x,y] <- ifelse(x >= y, sim_formations(formation_data[[x]],formation_data[[y]]), NA)
+      if(nrow(df2)<=0){
+        empty_data<-data.frame()
+        return(empty_data)
+      }
+    }
+  }
+  
+  #scaled_similarity_score(formation_data[[1]],formation_data[[2]])
+  
+  
+  #### Hierarchical clustering is done on the formations to find the biggest cluster which we can use to back track the sequences involved in the biggest cluster
+  
+  
+  m <- as.matrix(df2)
+  m <- as.dist(m)
+  hclust_avg <- hclust(m, method = 'centroid')
+  
+  #b <- data.frame(c(1:24,cutree(hclust_avg, k = 8)))
+  b <- data.frame(1:length(formation_data), cutree(hclust_avg, k = 6))
+  colnames(b) <- c("Formation", "Cluster")
+  
+  # find the biggest cluster and then formations in that cluster
+  cluster_biggest<-tail(names(sort(table(b$Cluster))), 1) %>% as.integer()
+  
+  
+  #### Gives the sequences which had the most frequent formations of the defending team.(THIS IS HOW WE GET RELEVANT SEQUENCES ) 
+  
+  sequences<-b %>% dplyr::filter(Cluster==cluster_biggest) %>% select(Formation) %>% pull()
+  
+  
+  
+  
+  library(rdist)
+  library(lpSolve)
+  library(BBmisc)
+  
+  
+  #### This functions finds the time in each sequence when the space gained by the attacking team was maximum or where the space controlled by defending team was minimum . It returns the frameids or the times during each sequence which can then be used to find if there was any 'run' or not around that time.
+  
+  find_max_space_created<-function(timestamp_data,event_data,vector_seq_numbers,tracking_data){
+    
+    data_disruption<-list()
+    
+    classification_vector<-rep(0,length(vector_seq_numbers))
+    passes_vector<-rep(0,length(vector_seq_numbers))
+    timestamps_frequent_sequences<-timestamp_data %>% dplyr::filter(sequence_id %in% vector_seq_numbers)
+    
+    timestamps_frequent_sequences<- timestamps_frequent_sequences %>% as.data.frame() 
+    
+    
+    for (i in 1:nrow(timestamps_frequent_sequences)){
+      pass_counter<-0
+      
+      # getting the start and end events of the sequence
+      sequence_events<-event_data %>% dplyr::filter(total_secs>= (timestamps_frequent_sequences[i,3]) & total_secs <= (timestamps_frequent_sequences[i,4]))
+      
+      # Checking if the ball ended in the box during this sequence
+      
+      # if it does then the classification vector will have a value 1 for that sequence number.
+      if(nrow(sequence_events)==0){
+        next()
+      }else{
+        for(j in 1:nrow(sequence_events)){
+          
+          if(is.na(sequence_events$`140`[j]) | is.na(sequence_events$`141`[j]))
+          {
+            next()
+            
+          }else{
+            
+            if((sequence_events$type_id[j]=='1') & (sequence_events$`140`[j]<50)){
+              
+              pass_counter<-pass_counter+1
+            }
+            
+            if((sequence_events$`140`[j]>=83) & ((sequence_events$`141`[j]>21) & (sequence_events$`141`[j] < 79)))
+            {
+              classification_vector[i]<-1
+              
+            }else{
+              next()
+            }
+          }
+          
+        }
+      }
+      if(pass_counter>=3){
+        passes_vector[i]<-1
+      }
+    }
+    
+    
+    
+    ### keep only those sequences which had atleast 3 passes in defensive half.
+    
+    vector_seq_numbers<-vector_seq_numbers[which(passes_vector==1)]
+    
+    
+    # To get only sequences where there was box entry use the classification vector line
+    if(box_entry==1){
+      box_entry_sequence_numbers<-vector_seq_numbers[which(classification_vector==1)]
+    }else{
+      box_entry_sequence_numbers<-vector_seq_numbers
+    }
+    
+    
+    frame_disruption_max<-rep(0,length(box_entry_sequence_numbers))
+    
+    box_entry_sequences_timestamp<-timestamp_data %>% dplyr::filter(sequence_id %in% box_entry_sequence_numbers)
+    
+    box_entry_sequences_timestamp<-as.data.frame(box_entry_sequences_timestamp)
+    
+    for(i in 1:length(box_entry_sequence_numbers)){
+      
+      if((!is.na(box_entry_sequences_timestamp[i,1])) & (!is.na(box_entry_sequences_timestamp[i,2]))){
+        
+        frame_numbers<-seq(box_entry_sequences_timestamp[i,1],box_entry_sequences_timestamp[i,2],5)
+        
+        space_creation<-seq(box_entry_sequences_timestamp[i,1],box_entry_sequences_timestamp[i,2],5)
+        
+        
+        
+        for(j in 1:length(space_creation)){
+          
+          
+          space_creation[j]<- find_space_created(tracking_data %>% dplyr::filter(frameIdx==frame_numbers[j]))
+          
+        }
+        frame_ids<-frame_numbers[which.min(space_creation)]
+        delta_max<-frame_numbers[which.min(diff(space_creation))]
+        data_disruption[[i]]<-list(frame_ids,delta_max,space_creation,frame_numbers)
+      }
+    }
+    return(data_disruption)
+  }
+  
+  
+  
+  
+  
+  
+  #### This function finds if there was any run around the times specified by the previous function. It returns the start, end times of the runs detected; the playerid of the player making that run and assigns two scores (space gained and formation disruption)
+  
+  
+  find_runs_and_players<-function(data){
+    find_eval_runs<-function(frame_number,sequence_number){
+      
+      nash <- subset(tracking_data, frameIdx >= frame_number - 750 & frameIdx <= frame_number + 200)
+      nash$team = as.numeric(nash$team)
+      
+      if(attack==T){
+        if(filtered_calendar[[1,3]]== defending_teamid){
+          nash <- nash %>% group_by(playerId) %>% mutate(new_speed = sgolayfilt(speed), accel = (new_speed - lag(new_speed))/0.04, new_accel = sgolayfilt(accel),
+                                                         dummy = ifelse(new_speed < 3.75 | new_accel < -2.5  | live == 'False' | lastTouch != 'home' | team != 2, 1, 0),
+                                                         run_start = min(which(new_speed > 4.5 & new_accel > 2.5)))
+        }else{
+          nash <- nash %>% group_by(playerId) %>% mutate(new_speed = sgolayfilt(speed), accel = (new_speed - lag(new_speed))/0.04, new_accel = sgolayfilt(accel),
+                                                         dummy = ifelse(new_speed < 3.75 | new_accel < -2.5  | live == 'False' | lastTouch != 'away' | team != 1, 1, 0),
+                                                         run_start = min(which(new_speed > 4.5 & new_accel > 2.5)))
+        }  
+      }else{
+        if(filtered_calendar[[1,3]]== defending_teamid){
+          nash <- nash %>% group_by(playerId) %>% mutate(new_speed = sgolayfilt(speed), accel = (new_speed - lag(new_speed))/0.04, new_accel = sgolayfilt(accel),
+                                                         dummy = ifelse(new_speed < 3.75 | new_accel < -2.5  | live == 'False' | lastTouch != 'away' | team != 1, 1, 0),
+                                                         run_start = min(which(new_speed > 4.5 & new_accel > 2.5)))
+        }else{
+          nash <- nash %>% group_by(playerId) %>% mutate(new_speed = sgolayfilt(speed), accel = (new_speed - lag(new_speed))/0.04, new_accel = sgolayfilt(accel),
+                                                         dummy = ifelse(new_speed < 3.75 | new_accel < -2.5  | live == 'False' | lastTouch != 'home' | team != 2, 1, 0),
+                                                         run_start = min(which(new_speed > 4.5 & new_accel > 2.5)))
+        }
+      }
+      nash <- nash %>% group_by(playerId) %>% mutate(run = ifelse(dummy == 0 & row_number() > run_start, 1, 0))
+      nash$start_frame_run <- nash[nash$run_start*22, 'frameIdx']
+      
+      
+      nash2 <- center_tracking(nash)
+      
+      runs <- subset(nash2, run == 1)
+      runs$lastframe <- lag(runs$frameIdx)
+      runs$frame_diff <- runs$frameIdx - runs$lastframe
+      runs$start_of_run <- ifelse(runs$frame_diff >= 10, runs$frameIdx, NA)
+      runs$start_of_run<-as.integer(runs$start_of_run)
+      runs[1, 'start_of_run'] <- runs[1, 'frameIdx']
+      xa <- nrow(runs)
+      runs$frame_last <- lead(runs$frame_diff)
+      runs$end_of_run <- ifelse(runs$frame_last >= 10, runs$frameIdx, NA)
+      runs$end_of_run<-as.integer(runs$end_of_run)
+      runs[xa, 'end_of_run'] <- runs[xa, 'frameIdx']
+      
+      
+      #tracking_data %>% dplyr::filter(team=='away') %>% pull(number) %>% unique()
+      
+      runs_time_data<-data.frame(na.omit(runs$start_of_run), na.omit(runs$end_of_run))
+      
+      if(nrow(runs_time_data)==0){
+        return(NULL)
+      }
+      
+      
+      #### Assigning points for gained space
+      runs_time_data$points_gained_space<-0
+      for(j in 1:nrow(runs_time_data)){
+        
+        frame1<-which(data[[sequence_number]][[4]]>runs_time_data[j,1])[1]
+        frame2<-which(data[[sequence_number]][[4]]>runs_time_data[j,2])[1]
+        # get space created vector
+        if((!is.na(frame1)) & (!is.na(frame2))){
+          vector_v<-(data[[sequence_number]][[3]][frame1:frame2])
+          
+          # 170 points is no significant space gained
+          
+          # 270 points gained is a decent score
+          runs_time_data[j,3]<-first(vector_v)-last(vector_v)
+        }
+      }
+      
+      
+      
+      #### Assigning points for disruption
+      
+      runs_time_data$points_gained_disruption<-0
+      for(k in 1:nrow(runs_time_data)){
+        if(attack==T){
+          if(filtered_calendar[[1,3]]== defending_teamid){
+            form1<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,1])) %>% dplyr::filter(team=='away' & number!=1)
+            
+            form2<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,2])) %>% dplyr::filter(team=='away' & number!=1)
+          }else{
+            form1<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,1])) %>% dplyr::filter(team=='home' & number!=1)
+            
+            form2<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,2])) %>% dplyr::filter(team=='home' & number!=1)
+          }
+          
+          
+        }else{
+          if(filtered_calendar[[1,3]]== defending_teamid){
+            form1<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,1])) %>% dplyr::filter(team=='home' & number!=1)
+            
+            form2<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,2])) %>% dplyr::filter(team=='home' & number!=1)
+          }else{
+            form1<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,1])) %>% dplyr::filter(team=='away' & number!=1)
+            
+            form2<-tracking_data %>% center_tracking() %>%  dplyr::filter((frameIdx==runs_time_data[k,2])) %>% dplyr::filter(team=='away' & number!=1)
+          }
+        }
+        form1_shape_matrix<-matrix(rep(NA,20),ncol=2,byrow=TRUE)
+        form2_shape_matrix<-matrix(rep(NA,20),ncol=2,byrow=TRUE)
+        
+        form1_shape_matrix[,1]<-form1$x
+        form1_shape_matrix[,2]<-form1$y
+        
+        
+        form2_shape_matrix[,1]<-form2$x
+        form2_shape_matrix[,2]<-form2$y
+        
+        dist_matrix<-cdist(form1_shape_matrix,form2_shape_matrix)
+        
+        ## 55 value of disruption is basically no disruption(On visual inspection)
+        
+        
+        if((!is.na(lp.assign(dist_matrix))) & (!is.null(lp.assign(dist_matrix)))){
+          runs_time_data[k,4]<-sum(dist_matrix*(lp.assign(dist_matrix)$solution))
+        }
+        else{
+          runs_time_data[k,4]<-0
+        }
+        
+      }
+      
+      
+      dataframes_return<-list()
+      dataframes_return[[1]]<-runs_time_data
+      dataframes_return[[2]]<-runs
+      return(dataframes_return)
+    }
+    
+    
+    data_empty1<-NULL
+    data_empty2<-NULL
+    
+    
+    for(i in 1:length(data)){
+      if(is.null(data[[i]])){
+        
+        next()
+        
+      }
+      if(is.null(find_eval_runs(data[[i]][[2]],i))){
+        
+        next()
+      }
+      else{
+        data_empty1<-rbind(data_empty1,find_eval_runs(data[[i]][[2]],i)[[1]])
+        data_empty2<-rbind(data_empty2,find_eval_runs(data[[i]][[2]],i)[[2]])
+      }
+    }
+    players_involved<-as.data.frame(data_empty2)
+    combined_runs<-as.data.frame(data_empty1)
+    final_runs<-combined_runs %>% filter_func()
+    
+    return(list(final_runs,players_involved))
+  }
+  
+  
+  
+  
+  
+  #### This function filters the runs using a thresholding rule which only keeps either those runs whose value of space gained >500 or those whose formation disruption score is >100
+  
+  
+  filter_func<-function(data){
+    filtered_data<-data %>% dplyr::filter(((points_gained_space>=500) & (points_gained_disruption>100))) %>% rename(start_of_run=na.omit.runs.start_of_run.,
+                                                                                                                    end_of_run=na.omit.runs.end_of_run.)
+    return(filtered_data)
+  }
+  
+  
+  
+  
+  #### Function which helps plot all the runs from left to right and reflects the coordinates 
+  
+  reflect_track<-function(data){
+    if(data$x[[1]]< 50 & tail(data$x,1) >50){
+      return(data)
+    }
+    if(data$x[[1]]> 50 & tail(data$x,1) >50){
+      return(data)
+    }
+    if(data$x[1]< 50 & tail(data$x,1) < 50){
+      data$x<- 100 - data$x
+      data$y<- 100 - data$y
+      return(data)
+    }
+    if(data$x[1]> 50 & tail(data$x,1) < 50){
+      data$x<- 100 - data$x
+      data$y<- 100 - data$y
+      return(data)
+    }
+  }
+  
+  
+  
+  
+  #### Function which helps identify multiple runs by the same player and seperates those runs
+  
+  run_seperator<-function(data){
+    run_nums<-which(data$frameIdx==0)
+    data$run_id<-0
+    max<-length(run_nums)
+    if(max>1){
+      data$run_id[1:(run_nums[2]-1)]<-0
+      
+      for(i in 2:length(run_nums)){
+        if(i==max){
+          data$run_id[run_nums[i]:nrow(data)]<- data$run_id[run_nums[i]-1]+1
+        }else{
+          data$run_id[run_nums[i]:(run_nums[i+1]-1)]<- data$run_id[run_nums[i]-1]+1
+        }
+      }
+    }
+    return(data %>% group_split(run_id))
+  }
+  
+  
+  adjusted_coordinates<-function(data){
+    center_x<-data %>% pull(x) %>% mean()
+    center_y<-data %>% pull(y) %>% mean()
+    adjust_x<-50- center_x 
+    adjust_y<-50- center_y 
+    data$x<-data$x + adjust_x
+    data$y<-data$y +adjust_y
+    
+    return(data)
+  }
+  
+  
+  
+  #### This function plots all the runs on a pitch, it returns the xy location data of each run which is used in the clustering step.
+  
+  plot_runs_function<-function(data){
+    
+    plot_data<-NULL
+    
+    if(nrow(data[[1]]) >=1){
+      for(i in 1:nrow(data[[1]])){
+        
+        p_ID<-data[[2]] %>% dplyr::filter((frameIdx>=data[[1]][i,1]) & (frameIdx< data[[1]][i,2])) %>% pull(playerId) %>% unique()
+        
+        if(adjust_coordinates==T){
+          out<-tracking_data %>% dplyr::filter((frameIdx>=data[[1]][i,1]) &(frameIdx<data[[1]][i,2]))
+          out$x<-out$x %>% rescale_x()
+          out$y<-out$y %>% rescale_y()
+          out<- out %>% adjusted_coordinates()
+          out<- out %>% dplyr::filter(playerId %in% p_ID)
+          
+        }else{
+          out<-tracking_data %>% dplyr::filter((playerId %in% p_ID) & (frameIdx>=data[[1]][i,1]) &(frameIdx<data[[1]][i,2]))
+          #
+          out$x<-out$x %>% rescale_x()
+          out$y<-out$y %>% rescale_y()
+        }
+        out<-out %>% group_split(playerId) %>% lapply(reflect_track) %>% bind_rows()
+        
+        
+        out <-transform(out, frameIdx = (frameIdx - min(frameIdx)) / (max(frameIdx) - min(frameIdx)))
+        
+        #out<- out %>% group_split(playerId) %>% lapply(run_seperator) %>% bind_rows()
+        plot_data<-rbind(plot_data,out)
+        
+        # out<-out %>% reflect_track()
+        z<-soccermatics::soccerPitch(lengthPitch = 100,widthPitch = 100)
+        a2<- z+geom_point(data = out,aes(x,y,fill=team,alpha=frameIdx),size=1,shape=21)
+        print(a2)
+        
+      }
+      
+      # plot_data<-plot_data %>% reflect_track()
+      plot_data$gameid<-gameid
+      z<-soccermatics::soccerPitch(lengthPitch = 100,widthPitch = 100)
+      a1<- z+geom_point(data = plot_data,aes(x,y,fill=team,alpha=frameIdx),size=1,shape=21)
+      #print(a1)
+      return(plot_data)
+    }
+    else{
+      empty_data<-data.frame()
+      return(empty_data)
+    }
+  }
+  
+  find_max_space_created(timestamps_data,event_data,sequences,tracking_data) %>% find_runs_and_players() %>% plot_runs_function()
+  
+}
+
+
+
+

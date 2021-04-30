@@ -1,0 +1,225 @@
+---
+title: "Dangerous Runs Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    social: menu
+    source_code: embed
+    theme: united
+runtime: shiny
+---
+
+
+
+```{r}
+
+#################### Getting Nashville SC's Game schedule for the season ################################################
+
+
+calendar<-nashvillesc::getSeasonCalendar()
+games_team<-calendar %>% dplyr::filter(HomeTeamID==15154 | AwayTeamID==15154) %>% select(game_id)
+games_calendar<- calendar %>% dplyr::filter(HomeTeamID==15154 | AwayTeamID==15154) %>% select(HomeTeam,AwayTeam,game_id)
+
+
+insight_data<-nashvillesc::get_parsed_2S_Insight_data(2124217)
+insight_data_start_types<-insight_data %>% pull(startType) %>% unique()
+
+
+################# Function which helps identify multiple runs by the same player and seperates those runs ############### 
+run_seperator<-function(data){
+run_nums<-which(data$frameIdx==0)
+data$run_id<-0
+max<-length(run_nums)
+if(max>1){
+data$run_id[1:(run_nums[2]-1)]<-0
+
+for(i in 2:length(run_nums)){
+if(i==max){
+data$run_id[run_nums[i]:nrow(data)]<- data$run_id[run_nums[i]-1]+1
+}else{
+  data$run_id[run_nums[i]:(run_nums[i+1]-1)]<- data$run_id[run_nums[i]-1]+1
+}
+}
+}
+return(data)
+}
+
+
+```
+
+
+```{r,include=FALSE}
+
+source("runs_1.R", local = knitr::knit_global())
+source("runs_2.R", local = knitr::knit_global())
+# or sys.source("your-script.R", envir = knitr::knit_global())
+```
+
+
+
+``` {r}
+
+
+###################### This function gets the runs for multiple games and it uses the previous function which was implemented for a single game to do so. It takes parameters like the id team of the team you wish to do the analysis for
+########################################################################################################################
+
+
+## The list specific games for which you want the algorithm to show results
+## Box entry parameter to filter out sequences to keep only those which led to a box entry.
+
+library(rlist)
+get_runs<-function(team_id_for=15154,attacking=F,gameid_list,box_entries=0,from_seq,num_clusters){
+
+calendar<-nashvillesc::getSeasonCalendar()
+games<- calendar %>% dplyr::filter(HomeTeamID==team_id_for | AwayTeamID==team_id_for)
+result<-list()
+
+for(i in gameid_list){
+  dummy<-dangerous_runsV2(i,team_id_for,box_entry = box_entries,attack =attacking ,adjust_coordinates = T,from_seq=from_seq)
+  if(nrow(dummy)<=0 | is.null(dummy)){
+    next()
+  }else{
+
+  result[[i]]<-dummy %>% group_split(playerId) %>% lapply(run_seperator) %>% lapply(make_cluster_points) %>% bind_rows()
+  }
+}
+
+result_new<-list.rbind(result)
+if(is.null(result_new)){
+  return(NULL)
+}else{
+kmeans_data<- result_new %>% arrange(x1)
+}
+ k <- kmeans(kmeans_data[1:6],centers=num_clusters,nstart = 10)
+kmeans_data$cluster<-k$cluster
+
+
+return(kmeans_data)
+}
+
+
+
+
+
+
+
+######################### This function plots the entire run cluster ###################################################
+
+plot_runs_cluster<-function(kmeans_data){
+plot_clustering_data<-kmeans_data %>% group_by(cluster) %>% summarise(x1_mean=mean(x1),x2_mean=mean(x2),x3_mean=mean(x3),y1_mean=mean(y1),y2_mean=mean(y2),y3_mean=mean(y3),N_runs=n())
+
+z<-soccermatics::soccerPitch(lengthPitch = 100,widthPitch = 100)
+a1<- z+
+    geom_segment(data = plot_clustering_data, aes(x=x1_mean,y=y1_mean,xend=x2_mean,yend=y2_mean,color=as.character(cluster)),size=2)+
+  geom_segment(data = plot_clustering_data, aes(x=x2_mean,y=y2_mean,xend=x3_mean,yend=y3_mean,color=as.character(cluster)),size=2,arrow = arrow(length = unit(0.03, "npc")))+geom_label(data=plot_clustering_data,aes(x=x1_mean,y=y1_mean,label=N_runs),size=3)
+
+
+print(a1)
+}
+
+
+
+
+#### This functions returns a data frame which times specified for each run and also tells which game is it from.########
+extract_video_playlist<-function(data,cluster_number){
+  return(data %>% dplyr::filter(cluster==cluster_number) %>% select(start_of_run,end_of_run,period,gameid,cluster))
+}
+
+```
+
+
+
+
+
+View Calendar
+=======================================================================
+
+
+Columns
+-----------------------------------------------------------------------
+
+```{r}
+DT::renderDataTable({
+games_calendar
+})
+
+
+```
+
+
+
+
+View Clusters
+=======================================================================
+
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+```{r}
+# sliderInput('sampleSize', 'Sample Size', min=1, max=nrow(dataset),
+#             value=min(1000, nrow(dataset)), step=500, round=0)
+#checkboxInput('reporting_u', 'Under report', value = FALSE)
+#checkboxInput('reporting_d', 'Delayed Report', value = TRUE)
+
+
+
+checkboxInput('box_entries', 'Sequences with only box entries', value = FALSE)
+selectInput('gameids', 'Select Games', choices =  unique(games_team),multiple = T)
+
+selectInput('start_types', 'Select Possesion Start type', choices =  unique(insight_data_start_types),multiple = T)
+
+
+selectInput('clust_num', 'Select Number of Clusters to form', choices = seq(1,20))
+
+
+actionButton('button','Generate visualization')
+
+# 
+# sliderInput('lower_q', label = 'Lower Quantile', min = 0.1, max = 0.9, value = 0.05, 
+#             step = 0.05)
+# 
+# sliderInput('upper_q', label = 'Upper Quantile', min = 0.1, max = 0.9, value = 0.9, 
+#             step = 0.05)
+
+```
+
+
+
+Columns
+-----------------------------------------------------------------------
+
+```{r}
+
+data_input<-eventReactive(input$button,{
+  if(input$box_entries){
+      p1<<-get_runs(team_id_for = 15154,attacking = F,gameid_list = c(input$gameids),box_entries = 1,from_seq=c(input$start_types),num_clusters = input$clust_num)
+      
+    }else{
+     p1<<- get_runs(team_id_for = 15154,attacking = F,gameid_list = c(input$gameids),box_entries = 0,from_seq=c(input$start_types),num_clusters = input$clust_num)
+
+    }
+  p1
+
+})
+
+  renderPlot({ data_input() %>% plot_runs_cluster()
+    })
+  
+
+  
+selectInput('video_pl', 'Select Cluster Number', choices =seq(1,20))
+
+actionButton('video','Generate video playlist')
+
+data_input2<-eventReactive(input$video,{
+  plot_result<-p1 %>% extract_video_playlist(cluster_number = reactive(input$video_pl))
+  plot_result
+})
+
+DT::renderDataTable({
+    data_input2()
+    })
+  
+
+
+```
