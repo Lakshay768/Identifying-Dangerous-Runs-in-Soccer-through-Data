@@ -35,23 +35,21 @@ The data is extracted using functions from the nashvillesc package which require
 
 ## Pipeline
 
-Run through 'Runs_dashboard.rmd' The Runs_dashboard.rmd contains code to take data using the package pre-process it, apply the algorithm to generate the runs data, cluster them and produce a visualization.
 
+#### Data processing 
 
-* Data processing 
+  The file [runs_data_preprocessing](Code/runs_data_preprocessing.R) process the data and produces a data frame which calculates space gained value and shape disruption value for all sequences and gives the XY locations of the runs identified in all the sequences in a game.
 
- The file [runs_data_preprocessing](Code/runs_data_preprocessing.R) process the data and produces a data frame which calculates space gained value and shape disruption value for all sequences and gives the XY locations of the runs identified in all the sequences in a game.
+#### Clustering
 
-* Clustering
+  The file [runs_clustering_funcs](Code/runs_clustering_funcs.R) contains functions to cluster the runs produced in the Data processing step.
 
- The file [runs_clustering_funcs](Code/runs_clustering_funcs.R) contains functions to cluster the runs produced in the Data processing step.
+#### Dashboard
+  Run the file [Runs_dashboard.Rmd](Code/Runs_dashboard.Rmd) it uses the previous files as source and contains functions to produce results for multiple games and also produces a dashboard which can be used in the following ways:
 
-* Dashboard
- Run the file [Runs_dashboard.Rmd](Code/Runs_dashboard.Rmd) it uses the previous files as source and contains functions to produce results for multiple games and also produces a dashboard which can be used in the following ways:
-
-1. Where the Dangerous runs came from
-2. Look at the times in video when each run happened 
-3. From which type of sequence did most of the dangerous runs come from.
+ 1. Where the Dangerous runs came from
+ 2. Look at the times in video when each run happened 
+ 3. From which type of sequence did most of the dangerous runs come from.
 
 
 
