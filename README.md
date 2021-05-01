@@ -12,7 +12,6 @@ Nashvillesc package (private), Tidyverse, signal, readr, shiny, shinydashboard, 
 
 ```
 install.packages('package name')
-
 ```
 
 In order to run the dashboard you will need to install Flexdashboard, shiny and shinydashboard. 
@@ -37,12 +36,22 @@ The data is extracted using functions from the nashvillesc package which require
 
 
 #### Data processing 
+    
+  The file [01_Load_utility_functions](Code/01_Load_utility_functions.R) contains all the necessary functions to help manipulate the data to run clustering and other algorithms on it. It also contains the function to find space created value of a team at any point 't'. This file is necessary to load to make sure everything works smoothly. It also contains the necessary libraries.
+     
+  The file [02_Find_sequences](Code/02_Find_sequences.R) contains a function which takes the gameid of the game for which the result needs to be produced, the defending team's id and the start type of sequences allowed for eg. sequences which started from Goalkicks or Corner Kick or Throw-in or a Tackle etc. The code gets the necessary data for the game and finds the sequences where the defending team were in their desired shape. The file then returns the sequence numbers where the team was in the desire shape and these sequences would then be used to find space created by the team. 
+  
+  The file [03_Find_max_space_gained](Code/03_Find_max_space_gained.R) contains a function which gives the space gained value of a team at any given time and also gives the the time 't' where the space gained between time 't' and 't-1' was maximum in the whole sequence.
+  
+  
+#### Finding and Filtering Runs
 
-  The file [runs_data_preprocessing](Code/runs_data_preprocessing.R) process the data and produces a data frame which calculates space gained value and shape disruption value for all sequences and gives the XY locations of the runs identified in all the sequences in a game.
+   The file [04_runs_identification_and_filtering](Code/04_runs_identification_and_filtering.R) contains a function which gives out the XY locations of all the runs identified and which pass the threshold value. The function also assigns each run a value for Space gained and Shape disruption which is then passed to a filtering function. The file returns the location data of each run.
 
+ 
 #### Clustering
 
-  The file [runs_clustering_funcs](Code/runs_clustering_funcs.R) contains functions to cluster the runs produced in the Data processing step.
+  The file [05_runs_clustering_funcs](Code/05_runs_clustering_funcs.R) contains functions to cluster the runs produced in the previous step
 
 #### Dashboard
   Run the file [Runs_dashboard.Rmd](Code/Runs_dashboard.Rmd) it uses the previous files as source and contains functions to produce results for multiple games and also produces a dashboard which can be used in the following ways:
